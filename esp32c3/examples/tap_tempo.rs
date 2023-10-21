@@ -141,12 +141,10 @@ mod app {
         rprintln!("{}, {}, {}, {}", presstimes[0], presstimes[1], presstimes[2], pressindex);
         
         if *pressindex >= 2{
-            let calctempo = 
-                (presstimes[2] - presstimes[1] + presstimes[1] - presstimes[0]) / 2;
             
             let mut tempo = cx.shared.tempo;
             tempo.lock(|tempo|{
-                *tempo = calctempo;
+                *tempo = (presstimes[2] - presstimes[1] + presstimes[1] - presstimes[0]) / 2;
             });
             *pressindex = 0;
         }
