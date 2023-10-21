@@ -97,7 +97,6 @@ mod app {
         )
     }
 
-    // notice this is not an async task
     #[idle(local = [ ])]
     fn idle(_: idle::Context) -> ! {
         loop {
