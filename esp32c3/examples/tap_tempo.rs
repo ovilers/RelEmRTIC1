@@ -101,6 +101,7 @@ mod app {
     fn idle(_: idle::Context) -> ! {
         loop {
             // Enable this for power saving feature
+            // May break SWD prints
             /*
             unsafe{
                 wfi();
@@ -114,7 +115,10 @@ mod app {
         let timer0 = cx.local.timer0;
         let mut tempo = cx.shared.tempo;
         let led = cx.local.led;
-        led.toggle().unwrap();
+        match led.toggle() {
+            Ok(()) => {},
+            Err(_) => rprintln!("Error toggling LED!")
+        }
 
         timer0.clear_interrupt();
         tempo.lock(|tempo| {
