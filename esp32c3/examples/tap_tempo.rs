@@ -37,7 +37,7 @@ mod app {
 
     #[shared]
     struct Shared {
-        tempo: [u64;2]
+        tempo: u64
     }
 
     #[local]
