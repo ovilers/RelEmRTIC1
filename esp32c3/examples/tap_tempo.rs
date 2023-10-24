@@ -14,6 +14,9 @@
 // bring in panic handler
 use panic_rtt_target as _;
 
+
+const WATCHDOG_TIMEOUT_MS: u64 = 20_000;
+
 #[rtic::app(device = esp32c3, dispatchers = [FROM_CPU_INTR0, FROM_CPU_INTR1])]
 mod app {
 
@@ -21,15 +24,16 @@ mod app {
         self as _,
         Rtc,
         clock::ClockControl,
-        peripherals::{Peripherals, TIMG0},
-        timer::{Timer, Timer0, TimerGroup},
+        peripherals::{Peripherals, TIMG0, TIMG1},
+        timer::{Timer, Timer0, TimerGroup, Wdt},
         prelude::*,
         IO, 
-        gpio::{Input, PullUp, GpioPin, PushPull, Output}, riscv::asm::wfi,
+        gpio::{Input, PullUp, GpioPin, PushPull, Output}
     };
 
     use rtt_target::{rprintln, rtt_init_print};
 
+    use crate::WATCHDOG_TIMEOUT_MS;
 
     #[shared]
     struct Shared {
@@ -39,6 +43,7 @@ mod app {
     #[local]
     struct Local {
         rtc: Rtc<'static>,
+        watchdog: Wdt<TIMG1>,
         presstimes: [u64;3],
         pressindex: usize,
         button: GpioPin<Input<PullUp>, 9>,
@@ -62,22 +67,31 @@ mod app {
             &clocks,
             &mut system.peripheral_clock_control,
         );
-        let mut timer0 = timer_group0.timer0;
+        let timer_group1 = TimerGroup::new(
+            peripherals.TIMG1,
+            &clocks,
+            &mut system.peripheral_clock_control,
+        );
+        
 
-        let tempo: u64 = 1000;
+        let mut timer0 = timer_group0.timer0;
+        let mut watchdog = timer_group1.wdt; 
+
+        let tempo: u64 = 0;
         let rtc: Rtc<'_> = Rtc::new(peripherals.RTC_CNTL);
 
-        let mut presstimes = [0, 1, 2];
-        let mut pressindex = 0;
+        let presstimes = [0, 0, 0];
+        let pressindex = 0;
 
         let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
         
         let mut button = io.pins.gpio9.into_pull_up_input();
-
         let led = io.pins.gpio7.into_push_pull_output();
 
+        watchdog.enable();
+        watchdog.start(WATCHDOG_TIMEOUT_MS.millis());
         timer0.listen();
-        timer0.start((tempo/2).millis());
+        timer0.start((100u64).millis());
         button.listen(esp32c3_hal::gpio::Event::FallingEdge);
 
         
@@ -88,6 +102,7 @@ mod app {
             },
             Local {
                 rtc,
+                watchdog,
                 presstimes,
                 pressindex,
                 button,
@@ -100,13 +115,7 @@ mod app {
     #[idle(local = [ ])]
     fn idle(_: idle::Context) -> ! {
         loop {
-            // Enable this for power saving feature
-            // May break SWD prints
-            /*
-            unsafe{
-                wfi();
-            };
-            */
+          
         }
     }
 
@@ -115,47 +124,77 @@ mod app {
         let timer0 = cx.local.timer0;
         let mut tempo = cx.shared.tempo;
         let led = cx.local.led;
-        match led.toggle() {
-            Ok(()) => {},
-            Err(_) => rprintln!("Error toggling LED!")
-        }
-
+        let mut toggle: bool = false;
+        
         timer0.clear_interrupt();
+
         tempo.lock(|tempo| {
-            timer0.start((*tempo/2).millis());
+            // I wanted to keep locking as short as possible so we extract result of comparison in bool
+            // and execute result outside of critical section
+            if *tempo != 0{
+                toggle = true;
+                timer0.start((*tempo/2).millis());
+            }
         });
+
+        if toggle{ 
+            led.toggle().unwrap_or_else(|e| rprintln!("Error toggling LED! {:?}", e));
+        }
+        else {
+            timer0.start(100u64.millis());
+        }
         
 
     }
 
-    #[task(binds = GPIO, priority=2, local = [rtc, button, presstimes, pressindex], shared = [tempo])]
+    fn get_delta_u64(x1: u64, x2: u64) -> u64{
+        if x1 > x2 {
+            return x1 - x2;
+        }
+        return x2 - x1;
+    }
+
+    #[task(binds = GPIO, priority=2, local = [rtc, watchdog, button, presstimes, pressindex], shared = [tempo])]
     fn button(cx: button::Context) {
         rprintln!("button press");
+        cx.local.watchdog.feed();
         let now = cx.local.rtc.get_time_ms();
         
         let pressindex = cx.local.pressindex;
         let presstimes = cx.local.presstimes;
 
-        // Prevent overly long tempos caused by an unfinished sequence affecting later sequence 
-        if *pressindex > 0 && (now - presstimes[*pressindex-1]) > 10000 {
-            *pressindex = 0
-        }
-
         presstimes[*pressindex] = now;
         rprintln!("{}, {}, {}, {}", presstimes[0], presstimes[1], presstimes[2], pressindex);
         
         if *pressindex >= 2{
-            
-            let mut tempo = cx.shared.tempo;
-            tempo.lock(|tempo|{
-                *tempo = (presstimes[2] - presstimes[1] + presstimes[1] - presstimes[0]) / 2;
-            });
             *pressindex = 0;
         }
         else {
             *pressindex += 1;
         }
-        
+
+        // Led will only turn on after three presses
+        let mut tempo = cx.shared.tempo;
+        for i in 0..presstimes.len() {
+            if presstimes[i] == 0{
+                cx.local.button.clear_interrupt(); 
+                return;
+            }
+        }
+        let delta0;
+
+        if presstimes[0] > presstimes[1]{
+            delta0 = get_delta_u64(presstimes[0], presstimes[1]);        
+        }
+        else{
+            delta0 = get_delta_u64(presstimes[0], presstimes[2]);
+        }
+        let delta1 = get_delta_u64(presstimes[1], presstimes[2]);
+
+        tempo.lock(|tempo|{
+            *tempo = (delta0 + delta1) / 2;
+        });
+
         cx.local.button.clear_interrupt();
     }
 
